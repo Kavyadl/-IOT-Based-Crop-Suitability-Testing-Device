@@ -1,0 +1,225 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 4); // Set LCD address and dimensions
+
+const int ThermistorPin = 0;
+const int SoilMoisturePin = A1; // Pin for soil moisture sensor
+const int PhSensorPin = A2; // Pin for pH sensor
+const int S0 = 4;
+const int S1 = 5;
+const int S2 = 6;
+const int S3 = 7;
+const int sensorOut = 8;
+
+int redMin = 14; // Red minimum value
+int redMax = 82; // Red maximum value
+int greenMin = 16; // Green minimum value
+int greenMax = 93; // Green maximum value
+int blueMin = 12; // Blue minimum value
+int blueMax = 68; // Blue maximum value
+
+int redPW = 0;
+int greenPW = 0;
+int bluePW = 0;
+int redValue;
+int greenValue;
+int blueValue;
+unsigned long previousMillis = 0;
+const long interval = 5000; // Update interval in milliseconds
+
+float temperatureOffset = 17.0; // Adjust this offset based on calibration
+
+struct Crop {
+  String name;
+  String soilType;
+  float minPH;
+  float maxPH;
+  float minTemp;
+  float maxTemp;
+  int minMoisture;
+  int maxMoisture;
+};
+
+Crop crops[] = {
+  {"Sunflower", "Black Soil", 6.0, 7.5, 20, 30, 50, 60},
+  {"Tomato", "Red Soil", 5.5, 7.0, 20, 30, 60, 70},
+  {"Potato", "Red Soil", 5.5, 7.0, 15, 25, 60, 70},
+  {"Carrot", "Red Soil", 5.5, 7.0, 15, 25, 50, 60},
+  {"Radish", "Red Soil", 5.5, 7.0, 15, 25, 50, 60},
+  {"Onion", "Red Soil", 5.5, 7.0, 15, 25, 60, 70},
+  {"Garlic", "Red Soil", 5.5, 7.0, 15, 25, 60, 70},
+  {"Ginger", "Red Soil", 5.5, 7.0, 20, 30, 60, 70},
+  {"Cabbage", "Red Soil", 5.5, 7.0, 15, 25, 50, 60},
+  {"Spinach", "Red Soil", 5.5, 7.0, 15, 25, 60, 70},
+  {"Lettuce", "Red Soil", 5.5, 7.0, 20, 30, 50, 60},
+  {"Peas", "Red Soil", 6.0, 7.5, 20, 30, 40, 50},
+  {"Beans", "Red Soil", 6.0, 7.5, 20, 30, 40, 50},
+  {"Pumpkin", "Red Soil", 5.5, 7.0, 25, 35, 60, 70},
+  {"Watermelon", "Red Soil", 5.5, 7.0, 25, 35, 70, 80},
+  {"Muskmelon", "Red Soil", 5.5, 7.0, 25, 35, 70, 80},
+  {"Cucumber", "Red Soil", 5.5, 7.0, 25, 35, 70, 80},
+  {"Chili", "Red Soil", 5.5, 7.0, 20, 30, 50, 60},
+  {"Lemon", "Red Soil", 5.5, 7.0, 25, 35, 60, 70},
+  {"Orange", "Red Soil", 5.5, 7.0, 25, 35, 60, 70},
+  {"Papaya", "Red Soil", 5.5, 7.0, 25, 35, 70, 80}
+};
+
+int cropCounter = 0; // Initialize counter for cycling through crop names
+
+void setup() {
+  lcd.init();
+  lcd.backlight();
+  pinMode(S0, OUTPUT);
+  pinMode(S1, OUTPUT);
+  pinMode(S2, OUTPUT);
+  pinMode(S3, OUTPUT);
+  pinMode(sensorOut, INPUT);
+  digitalWrite(S0, HIGH); // Set Frequency scaling to 20%
+  digitalWrite(S1, LOW);
+  Serial.begin(9600);
+  delay(1000);
+  Serial.println("SOIL METER");
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+
+    int Vo = analogRead(ThermistorPin);
+    float R1 = 10000;
+    float R2 = R1 * (1023.0 / (float)Vo - 1.0);
+    float logR2 = log(R2);
+    float T = (1.0 / (1.009249522e-03 + 2.378405444e-04 * logR2 + 2.019202697e-07 * logR2 * logR2 * logR2));
+    float Tc = abs(T - 272.15) - temperatureOffset; // Adjusted temperature
+    int soil = analogRead(SoilMoisturePin);
+    int percentage = map(soil, 1023, 0, 0, 100);
+
+    float avgPhValue = getAveragePhValue();
+
+    // Print initial data
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("TEMP = ");
+    lcd.print(Tc);
+    lcd.print("C");
+    lcd.setCursor(0, 1);
+    lcd.print("PH = ");
+    lcd.print(avgPhValue, 2); // Display pH value with 2 decimal places
+    lcd.setCursor(-4, 2);
+    lcd.print("MOISTURE = ");
+    lcd.print(percentage);
+    lcd.print("%");
+    lcd.setCursor(-4, 3);
+    lcd.print("SOILTYPE = ");
+    lcd.print(getSoilType());
+
+    delay(3000); // Delay before displaying the suitable crop
+    String cropName = getSuitableCrop(avgPhValue, Tc, percentage);
+    displaySuitableCrop(cropName);
+  }
+}
+
+float getAveragePhValue() {
+  int buf[10], temp;
+  unsigned long int avgValue = 0;
+
+  for (int i = 0; i < 10; i++) { //Get 10 sample value from the pH sensor for smoothing the value
+    buf[i] = analogRead(PhSensorPin);
+    delay(10);
+  }
+
+  for (int i = 0; i < 9; i++) { //sort the analog from small to large
+    for (int j = i + 1; j < 10; j++) {
+      if (buf[i] > buf[j]) {
+        temp = buf[i];
+        buf[i] = buf[j];
+        buf[j] = temp;
+      }
+    }
+  }
+
+  for (int i = 2; i < 8; i++) //take the average value of 6 center samples
+    avgValue += buf[i];
+
+  float phValue = (float)avgValue * 5.0 / 1024 / 6; //convert the analog into millivolt
+  phValue = 3.5 * phValue; //convert the millivolt into pH value
+  return phValue;
+}
+
+String getSoilType() {
+  int redValues[5];
+  int mostCommonRed;
+
+  for (int i = 4; i > 0; i--) {
+    redValues[i] = redValues[i - 1];
+  }
+  redValues[0] = map(getRedPW(), redMin, redMax, 255, 0);
+
+  mostCommonRed = mostCommonValue(redValues, 5);
+
+  // Round off the most common red value to the nearest condition
+  if (mostCommonRed >= (redMin + redMax) / 2) {
+    lcd.print("RS"); // Display Red Soil
+    return "Red Soil";
+  } else {
+    lcd.print("RS"); // Display Black Soil
+    return "Black Soil";
+  }
+}
+
+int getRedPW() {
+  // Set sensor to read Red only
+  digitalWrite(S2, LOW);
+  digitalWrite(S3, LOW);
+  // Read the output Pulse Width
+  return pulseIn(sensorOut, LOW);
+}
+
+int mostCommonValue(int arr[], int size) {
+  int maxCount = 0;
+  int mostCommonValue = -1;
+
+  for (int i = 0; i < size; i++) {
+    int count = 0;
+    for (int j = 0; j < size; j++) {
+      if (arr[i] == arr[j]) {
+        count++;
+      }
+    }
+    if (count > maxCount) {
+      maxCount = count;
+      mostCommonValue = arr[i];
+    }
+  }
+  return mostCommonValue;
+}
+
+String getSuitableCrop(float phValue, float temperature, int moisture) {
+  for (int i = 0; i < sizeof(crops) / sizeof(crops[0]); i++) {
+    if (phValue >= crops[i].minPH && phValue <= crops[i].maxPH &&
+        temperature >= crops[i].minTemp && temperature <= crops[i].maxTemp &&
+        moisture >= crops[i].minMoisture && moisture <= crops[i].maxMoisture) {
+      return crops[i].name;
+    }
+  }
+  return "No Suitable Crop Found";
+}
+
+void displaySuitableCrop(String cropName) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Suitable Crop:");
+  lcd.setCursor(0, 1);
+
+  // Display the crop name based on the counter value
+  lcd.print(crops[cropCounter].name);
+
+  // Increment the counter for the next crop
+  cropCounter++;
+  if (cropCounter >= sizeof(crops) / sizeof(crops[0])) {
+    cropCounter = 0; // Reset counter if it exceeds the array size
+  }
+}
